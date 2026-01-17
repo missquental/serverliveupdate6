@@ -414,7 +414,7 @@ def create_live_stream(service, title, description, scheduled_start_time, tags=N
             part="snippet,cdn",
             body={
                 "snippet": {
-                    "title": f"{title} - Stream",
+                    "title": title,
                     "description": description
                 },
                 "cdn": {
@@ -757,8 +757,8 @@ def auto_create_live_broadcast(service, use_custom_settings=True, custom_setting
             
             # Default settings
             default_settings = {
-                'title': f"Auto Live Stream {datetime.now().strftime('%Y-%m-%d %H:%M')} - Batch {batch_index}",
-                'description': f"Auto-generated live stream - Batch {batch_index}",
+                'title': f"Live Stream - Batch {batch_index}",
+                'description': f"Live streaming session - Batch {batch_index}",
                 'tags': [],
                 'category_id': "20",  # Gaming
                 'privacy_status': "public",
@@ -767,10 +767,7 @@ def auto_create_live_broadcast(service, use_custom_settings=True, custom_setting
             
             # Gunakan setting custom jika tersedia
             if use_custom_settings and custom_settings:
-                settings = {**default_settings, **custom_settings}
-                # Tambahkan batch index ke title jika belum ada
-                if f"Batch {batch_index}" not in settings['title']:
-                    settings['title'] = f"{settings['title']} - Batch {batch_index}"
+                settings = custom_settings
             else:
                 settings = default_settings
             
@@ -1401,7 +1398,7 @@ def main():
         # Live Batch Streaming Settings
         st.subheader("🔄 Live Batch Streaming")
         batch_count = st.slider("🔢 Number of Live Batches", min_value=1, max_value=10, value=3, 
-                               help="Jumlah batch streaming secara bersamaan")
+                               help="Jumlah batch streaming secara bersamaan", key="batch_count_slider")
         
         # Manual Live Stream Settings for Each Batch
         st.subheader("🔧 Batch Configuration")
@@ -1422,9 +1419,9 @@ def main():
                     # Video selection for this batch
                     batch_video = st.selectbox(
                         f"🎬 Video for Batch {i+1}", 
-                        all_videos, 
+                        all_videos if all_videos else ["No videos available"], 
                         key=f"batch_video_{i}",
-                        index=min(i, len(all_videos)-1) if all_videos else 0
+                        index=0
                     )
                     
                     # Title for this batch
@@ -1612,7 +1609,7 @@ def main():
                 return
             
             service = st.session_state['youtube_service']
-            batch_count = st.session_state.get('batch_count', 3)  # Default 3 batches
+            batch_count = st.session_state.get('batch_count_slider', 3)  # Use the slider value
             
             # Get video settings
             video_settings = st.session_state.get('video_settings', None)
