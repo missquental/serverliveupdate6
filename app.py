@@ -757,8 +757,8 @@ def auto_create_live_broadcast(service, use_custom_settings=True, custom_setting
             
             # Default settings
             default_settings = {
-                'title': f"Auto Live Stream {datetime.now().strftime('%Y-%m-%d %H:%M')}  {batch_index}",
-                'description': f"Auto-generated live stream  {batch_index}",
+                'title': f"Auto Live Stream {datetime.now().strftime('%Y-%m-%d %H:%M')} - Batch {batch_index}",
+                'description': f"Auto-generated live stream - Batch {batch_index}",
                 'tags': [],
                 'category_id': "20",  # Gaming
                 'privacy_status': "public",
@@ -770,7 +770,7 @@ def auto_create_live_broadcast(service, use_custom_settings=True, custom_setting
                 settings = {**default_settings, **custom_settings}
                 # Tambahkan batch index ke title jika belum ada
                 if f"Batch {batch_index}" not in settings['title']:
-                    settings['title'] = f"{settings['title']}  {batch_index}"
+                    settings['title'] = f"{settings['title']} - Batch {batch_index}"
             else:
                 settings = default_settings
             
@@ -1430,7 +1430,7 @@ def main():
                     # Title for this batch
                     batch_title = st.text_input(
                         f"📝 Title for Batch {i+1}", 
-                        value=f"Live Stream  {i+1}", 
+                        value=f"Live Stream - Batch {i+1}", 
                         key=f"batch_title_{i}"
                     )
                 
@@ -1438,7 +1438,7 @@ def main():
                     # Description for this batch
                     batch_description = st.text_area(
                         f"📄 Description for Batch {i+1}", 
-                        value=f"Live streaming session  {i+1}", 
+                        value=f"Live streaming session - Batch {i+1}", 
                         key=f"batch_desc_{i}",
                         height=80
                     )
