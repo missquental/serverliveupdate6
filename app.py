@@ -552,29 +552,45 @@ def get_video_duration(video_path):
         st.warning(f"Tidak dapat membaca durasi video: {e}")
         return None
 
-def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, session_id=None, duration_limit=None):
-    """Run FFmpeg for streaming with optional duration limit."""
+def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, session_id=None, duration_limit=None, video_settings=None):
+    """Run FFmpeg for streaming with optional duration limit and custom video settings."""
     output_url = rtmp_url or f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
-    scale = "-vf scale=720:1280" if is_shorts else ""
     
+    # Default video settings
+    if video_settings is None:
+        video_settings = {
+            "resolution": "1080p",
+            "bitrate": "2500k",
+            "fps": "30",
+            "codec": "libx264",
+            "audio_bitrate": "128k",
+            "audio_codec": "aac"
+        }
+    
+    # Build FFmpeg command with custom settings
     cmd = [
         "ffmpeg", "-re", "-stream_loop", "-1", "-i", video_path,
-        "-c:v", "libx264", "-preset", "veryfast", "-b:v", "2500k",
-        "-maxrate", "2500k", "-bufsize", "5000k",
-        "-g", "60", "-keyint_min", "60",
-        "-c:a", "aac", "-b:a", "128k",
+        "-c:v", video_settings["codec"], "-preset", "veryfast", 
+        "-b:v", video_settings["bitrate"], "-maxrate", video_settings["bitrate"],
+        "-bufsize", str(int(video_settings["bitrate"].replace('k', '')) * 2) + "k",
+        "-r", video_settings["fps"], "-g", str(int(video_settings["fps"]) * 2),
+        "-keyint_min", str(int(video_settings["fps"]) * 2),
+        "-c:a", video_settings["audio_codec"], "-b:a", video_settings["audio_bitrate"],
         "-f", "flv"
     ]
     
+    # Add scaling for Shorts mode if enabled
+    if is_shorts:
+        cmd.extend(["-vf", "scale=720:1280"])
+    
+    # Add duration limit if specified
     if duration_limit:
         cmd.insert(1, str(duration_limit))
         cmd.insert(1, "-t")
-
-    if scale:
-        cmd += scale.split()
+    
     cmd.append(output_url)
     
-    start_msg = f"🚀 Starting FFmpeg: {' '.join(cmd[:8])}... [RTMP URL hidden for security]"
+    start_msg = f"🚀 Starting FFmpeg with settings: {' '.join(cmd[:8])}... [RTMP URL hidden for security]"
     log_callback(start_msg)
     if session_id:
         log_to_database(session_id, "INFO", start_msg, video_path)
@@ -684,7 +700,7 @@ def get_youtube_categories():
     }
 
 # Fungsi untuk auto start streaming
-def auto_start_streaming(video_path, stream_key, is_shorts=False, custom_rtmp=None, session_id=None, duration_limit=None):
+def auto_start_streaming(video_path, stream_key, is_shorts=False, custom_rtmp=None, session_id=None, duration_limit=None, video_settings=None):
     """Auto start streaming dengan konfigurasi default"""
     if not video_path or not stream_key:
         st.error("❌ Video atau stream key tidak ditemukan!")
@@ -706,7 +722,7 @@ def auto_start_streaming(video_path, stream_key, is_shorts=False, custom_rtmp=No
     # Jalankan FFmpeg di thread terpisah
     st.session_state['ffmpeg_thread'] = threading.Thread(
         target=run_ffmpeg, 
-        args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, session_id, duration_limit), 
+        args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, session_id, duration_limit, video_settings), 
         daemon=True
     )
     st.session_state['ffmpeg_thread'].start()
@@ -1361,6 +1377,71 @@ def main():
             if enable_monetization:
                 ad_breaks = st.checkbox("📺 Enable Ad Breaks")
                 super_chat = st.checkbox("💬 Enable Super Chat", value=True)
+        
+        # Live Batch Streaming Settings
+        st.subheader("🔄 Live Batch Streaming")
+        batch_count = st.slider("🔢 Number of Live Batches", min_value=1, max_value=10, value=3, 
+                               help="Jumlah batch streaming secara bersamaan")
+        
+        # Manual Live Stream Settings
+        st.subheader("🔧 Manual Live Stream Settings")
+        with st.expander("🛠️ Advanced Manual Settings"):
+            col_manual1, col_manual2 = st.columns(2)
+            
+            with col_manual1:
+                custom_server = st.checkbox("🌐 Enable Custom Server")
+                if custom_server:
+                    custom_rtmp_url = st.text_input("RTMP Server URL", 
+                                                   placeholder="rtmp://your-server.com/app")
+                    custom_stream_key = st.text_input("Custom Stream Key", 
+                                                     placeholder="your-stream-key")
+                
+                buffer_size = st.text_input("📦 Buffer Size", value="2048k")
+                keyframe_interval = st.number_input("⏭️ Keyframe Interval", min_value=1, max_value=10, value=2)
+            
+            with col_manual2:
+                preset = st.selectbox("⚡ Preset", ["ultrafast", "superfast", "veryfast", "faster", "fast"], 
+                                    index=2)
+                profile = st.selectbox("📋 Profile", ["baseline", "main", "high"], index=1)
+                tune = st.selectbox("🎯 Tune", ["film", "animation", "grain", "stillimage", 
+                                              "fastdecode", "zerolatency"], index=5)
+                
+                custom_parameters = st.text_area("🎛️ Custom Parameters", 
+                                               placeholder="-g 60 -sc_threshold 0 -b_strategy 0",
+                                               height=100)
+        
+        # Video Batch Settings
+        st.subheader("🎬 Video Batch Settings")
+        with st.expander("🎥 Video Encoding Configuration"):
+            col_video1, col_video2 = st.columns(2)
+            
+            with col_video1:
+                video_resolution = st.selectbox("📺 Resolution", 
+                                              ["720p", "1080p", "1440p", "2160p"], 
+                                              index=1)
+                video_bitrate = st.selectbox("📊 Video Bitrate", 
+                                           ["1500k", "2500k", "4000k", "6000k", "8000k", "12000k"], 
+                                           index=1)
+                video_fps = st.selectbox("🎞️ FPS", ["24", "30", "60"], index=1)
+                video_codec = st.selectbox("🎬 Video Codec", ["libx264", "libx265"], index=0)
+            
+            with col_video2:
+                audio_bitrate = st.selectbox("🎵 Audio Bitrate", 
+                                           ["96k", "128k", "192k", "256k", "320k"], 
+                                           index=1)
+                audio_codec = st.selectbox("🔊 Audio Codec", ["aac", "mp3"], index=0)
+                audio_channels = st.selectbox("🎧 Audio Channels", ["mono", "stereo"], index=1)
+                
+                # Save video settings to session state
+                video_settings = {
+                    "resolution": video_resolution,
+                    "bitrate": video_bitrate,
+                    "fps": video_fps,
+                    "codec": video_codec,
+                    "audio_bitrate": audio_bitrate,
+                    "audio_codec": audio_codec
+                }
+                st.session_state['video_settings'] = video_settings
     
     with col2:
         st.header("📊 Status & Controls")
@@ -1424,9 +1505,12 @@ def main():
                     else:
                         st.warning("Durasi video tidak ditemukan, streaming akan berjalan tanpa batas waktu.")
                 
+                # Get video settings from session state
+                video_settings = st.session_state.get('video_settings', None)
+                
                 st.session_state['ffmpeg_thread'] = threading.Thread(
                     target=run_ffmpeg, 
-                    args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, st.session_state['session_id'], duration_limit), 
+                    args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, st.session_state['session_id'], duration_limit, video_settings), 
                     daemon=True
                 )
                 st.session_state['ffmpeg_thread'].start()
