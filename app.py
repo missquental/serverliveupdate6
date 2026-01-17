@@ -552,7 +552,7 @@ def get_video_duration(video_path):
         st.warning(f"Tidak dapat membaca durasi video: {e}")
         return None
 
-def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, session_id=None, duration_limit=None, video_settings=None):
+def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, session_id=None, duration_limit=None, video_settings=None, batch_index=0):
     """Run FFmpeg for streaming with optional duration limit and custom video settings."""
     output_url = rtmp_url or f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
     
@@ -590,34 +590,34 @@ def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, s
     
     cmd.append(output_url)
     
-    start_msg = f"🚀 Starting FFmpeg with settings: {' '.join(cmd[:8])}... [RTMP URL hidden for security]"
+    start_msg = f"🚀 Batch {batch_index}: Starting FFmpeg with settings: {' '.join(cmd[:8])}... [RTMP URL hidden for security]"
     log_callback(start_msg)
     if session_id:
-        log_to_database(session_id, "INFO", start_msg, video_path)
+        log_to_database(session_id, "INFO", f"Batch {batch_index}: {start_msg}", video_path)
     
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in process.stdout:
-            log_callback(line.strip())
+            log_callback(f"Batch {batch_index}: {line.strip()}")
             if session_id:
-                log_to_database(session_id, "FFMPEG", line.strip(), video_path)
+                log_to_database(session_id, "FFMPEG", f"Batch {batch_index}: {line.strip()}", video_path)
         process.wait()
         
-        end_msg = "✅ Streaming completed successfully"
+        end_msg = f"✅ Batch {batch_index}: Streaming completed successfully"
         log_callback(end_msg)
         if session_id:
-            log_to_database(session_id, "INFO", end_msg, video_path)
+            log_to_database(session_id, "INFO", f"Batch {batch_index}: {end_msg}", video_path)
             
     except Exception as e:
-        error_msg = f"❌ FFmpeg Error: {e}"
+        error_msg = f"❌ Batch {batch_index}: FFmpeg Error: {e}"
         log_callback(error_msg)
         if session_id:
-            log_to_database(session_id, "ERROR", error_msg, video_path)
+            log_to_database(session_id, "ERROR", f"Batch {batch_index}: {error_msg}", video_path)
     finally:
-        final_msg = "⏹️ Streaming session ended"
+        final_msg = f"⏹️ Batch {batch_index}: Streaming session ended"
         log_callback(final_msg)
         if session_id:
-            log_to_database(session_id, "INFO", final_msg, video_path)
+            log_to_database(session_id, "INFO", f"Batch {batch_index}: {final_msg}", video_path)
 
 def auto_process_auth_code():
     """Automatically process authorization code from URL"""
@@ -700,49 +700,65 @@ def get_youtube_categories():
     }
 
 # Fungsi untuk auto start streaming
-def auto_start_streaming(video_path, stream_key, is_shorts=False, custom_rtmp=None, session_id=None, duration_limit=None, video_settings=None):
+def auto_start_streaming(video_path, stream_key, is_shorts=False, custom_rtmp=None, session_id=None, duration_limit=None, video_settings=None, batch_index=0):
     """Auto start streaming dengan konfigurasi default"""
     if not video_path or not stream_key:
         st.error("❌ Video atau stream key tidak ditemukan!")
         return False
     
     # Set session state untuk streaming
-    st.session_state['streaming'] = True
-    st.session_state['stream_start_time'] = datetime.now()
-    st.session_state['live_logs'] = []
+    if 'batch_streams' not in st.session_state:
+        st.session_state['batch_streams'] = {}
+    
+    batch_key = f"batch_{batch_index}"
+    st.session_state['batch_streams'][batch_key] = {
+        'streaming': True,
+        'stream_start_time': datetime.now(),
+        'live_logs': []
+    }
     
     def log_callback(msg):
-        if 'live_logs' not in st.session_state:
-            st.session_state['live_logs'] = []
-        st.session_state['live_logs'].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+        if 'batch_streams' not in st.session_state:
+            st.session_state['batch_streams'] = {}
+        if batch_key not in st.session_state['batch_streams']:
+            st.session_state['batch_streams'][batch_key] = {'live_logs': []}
+        if 'live_logs' not in st.session_state['batch_streams'][batch_key]:
+            st.session_state['batch_streams'][batch_key]['live_logs'] = []
+            
+        st.session_state['batch_streams'][batch_key]['live_logs'].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
         # Keep only last 100 logs in memory
-        if len(st.session_state['live_logs']) > 100:
-            st.session_state['live_logs'] = st.session_state['live_logs'][-100:]
+        if len(st.session_state['batch_streams'][batch_key]['live_logs']) > 100:
+            st.session_state['batch_streams'][batch_key]['live_logs'] = st.session_state['batch_streams'][batch_key]['live_logs'][-100:]
     
     # Jalankan FFmpeg di thread terpisah
-    st.session_state['ffmpeg_thread'] = threading.Thread(
+    ffmpeg_thread = threading.Thread(
         target=run_ffmpeg, 
-        args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, session_id, duration_limit, video_settings), 
+        args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, session_id, duration_limit, video_settings, batch_index), 
         daemon=True
     )
-    st.session_state['ffmpeg_thread'].start()
+    ffmpeg_thread.start()
+    
+    # Simpan referensi thread
+    if 'ffmpeg_threads' not in st.session_state:
+        st.session_state['ffmpeg_threads'] = {}
+    st.session_state['ffmpeg_threads'][batch_key] = ffmpeg_thread
     
     # Log ke database
-    log_to_database(session_id, "INFO", f"Auto streaming started: {video_path}")
+    log_to_database(session_id, "INFO", f"Batch {batch_index}: Auto streaming started: {video_path}")
     return True
 
 # Fungsi untuk auto create live broadcast dengan setting manual/otomatis
-def auto_create_live_broadcast(service, use_custom_settings=True, custom_settings=None, session_id=None):
+def auto_create_live_broadcast(service, use_custom_settings=True, custom_settings=None, session_id=None, batch_index=0):
     """Auto create live broadcast dengan setting manual atau otomatis"""
     try:
-        with st.spinner("Creating auto YouTube Live broadcast..."):
+        with st.spinner(f"Creating auto YouTube Live broadcast for batch {batch_index}..."):
             # Schedule for immediate start
             scheduled_time = datetime.now() + timedelta(seconds=30)
             
             # Default settings
             default_settings = {
-                'title': f"Auto Live Stream {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                'description': "Auto-generated live stream",
+                'title': f"Auto Live Stream {datetime.now().strftime('%Y-%m-%d %H:%M')} - Batch {batch_index}",
+                'description': f"Auto-generated live stream - Batch {batch_index}",
                 'tags': [],
                 'category_id': "20",  # Gaming
                 'privacy_status': "public",
@@ -752,6 +768,9 @@ def auto_create_live_broadcast(service, use_custom_settings=True, custom_setting
             # Gunakan setting custom jika tersedia
             if use_custom_settings and custom_settings:
                 settings = {**default_settings, **custom_settings}
+                # Tambahkan batch index ke title jika belum ada
+                if f"Batch {batch_index}" not in settings['title']:
+                    settings['title'] = f"{settings['title']} - Batch {batch_index}"
             else:
                 settings = default_settings
             
@@ -767,16 +786,17 @@ def auto_create_live_broadcast(service, use_custom_settings=True, custom_setting
             )
             
             if live_info:
-                st.session_state['current_stream_key'] = live_info['stream_key']
-                st.session_state['live_broadcast_info'] = live_info
-                st.success("🎉 Auto YouTube Live Broadcast Created Successfully!")
-                log_to_database(session_id, "INFO", f"Auto YouTube Live created: {live_info['watch_url']}")
+                if 'batch_live_info' not in st.session_state:
+                    st.session_state['batch_live_info'] = {}
+                st.session_state['batch_live_info'][f"batch_{batch_index}"] = live_info
+                st.success(f"🎉 Batch {batch_index}: Auto YouTube Live Broadcast Created Successfully!")
+                log_to_database(session_id, "INFO", f"Batch {batch_index}: Auto YouTube Live created: {live_info['watch_url']}")
                 return live_info
             else:
-                st.error("❌ Failed to create auto live broadcast")
+                st.error(f"❌ Batch {batch_index}: Failed to create auto live broadcast")
                 return None
     except Exception as e:
-        error_msg = f"Error creating auto YouTube Live: {e}"
+        error_msg = f"Batch {batch_index}: Error creating auto YouTube Live: {e}"
         st.error(error_msg)
         log_to_database(session_id, "ERROR", error_msg)
         return None
@@ -1383,6 +1403,65 @@ def main():
         batch_count = st.slider("🔢 Number of Live Batches", min_value=1, max_value=10, value=3, 
                                help="Jumlah batch streaming secara bersamaan")
         
+        # Manual Live Stream Settings for Each Batch
+        st.subheader("🔧 Batch Configuration")
+        with st.expander("🛠️ Configure Each Batch Settings"):
+            # Get all available videos
+            all_videos = [f for f in os.listdir('.') if f.endswith(('.mp4', '.flv', '.avi', '.mov', '.mkv'))]
+            
+            # Initialize batch configurations
+            if 'batch_configs' not in st.session_state:
+                st.session_state['batch_configs'] = {}
+            
+            # Create configuration for each batch
+            for i in range(batch_count):
+                st.markdown(f"### 📦 Batch {i+1} Settings")
+                col_batch1, col_batch2 = st.columns(2)
+                
+                with col_batch1:
+                    # Video selection for this batch
+                    batch_video = st.selectbox(
+                        f"🎬 Video for Batch {i+1}", 
+                        all_videos, 
+                        key=f"batch_video_{i}",
+                        index=min(i, len(all_videos)-1) if all_videos else 0
+                    )
+                    
+                    # Title for this batch
+                    batch_title = st.text_input(
+                        f"📝 Title for Batch {i+1}", 
+                        value=f"Live Stream - Batch {i+1}", 
+                        key=f"batch_title_{i}"
+                    )
+                
+                with col_batch2:
+                    # Description for this batch
+                    batch_description = st.text_area(
+                        f"📄 Description for Batch {i+1}", 
+                        value=f"Live streaming session - Batch {i+1}", 
+                        key=f"batch_desc_{i}",
+                        height=80
+                    )
+                    
+                    # Privacy for this batch
+                    batch_privacy = st.selectbox(
+                        f"🔒 Privacy for Batch {i+1}", 
+                        ["public", "unlisted", "private"], 
+                        key=f"batch_privacy_{i}",
+                        index=0
+                    )
+                
+                # Store batch configuration
+                st.session_state['batch_configs'][f"batch_{i+1}"] = {
+                    'video': batch_video,
+                    'title': batch_title,
+                    'description': batch_description,
+                    'privacy': batch_privacy,
+                    'category_id': category_id,
+                    'tags': tags,
+                    'made_for_kids': made_for_kids
+                }
+        
         # Manual Live Stream Settings
         st.subheader("🔧 Manual Live Stream Settings")
         with st.expander("🛠️ Advanced Manual Settings"):
@@ -1458,6 +1537,14 @@ def main():
         else:
             st.success("⚫ OFFLINE")
         
+        # Batch Streaming Status
+        if 'batch_streams' in st.session_state:
+            active_batches = sum(1 for batch in st.session_state['batch_streams'].values() if batch.get('streaming', False))
+            if active_batches > 0:
+                st.warning(f"🔴 BATCH LIVE ({active_batches} active)")
+            else:
+                st.success("⚫ BATCH OFFLINE")
+        
         # Control buttons
         if st.button("▶️ Start Streaming", type="primary"):
             # Get the current stream key
@@ -1518,6 +1605,63 @@ def main():
                 log_to_database(st.session_state['session_id'], "INFO", f"Streaming started: {video_path}")
                 st.rerun()
         
+        # Batch Start Streaming Button
+        if st.button("🔄 Start Batch Streaming", type="primary", help="Start multiple live streams simultaneously with different settings"):
+            if 'youtube_service' not in st.session_state:
+                st.error("❌ YouTube service not available!")
+                return
+            
+            service = st.session_state['youtube_service']
+            batch_count = st.session_state.get('batch_count', 3)  # Default 3 batches
+            
+            # Get video settings
+            video_settings = st.session_state.get('video_settings', None)
+            
+            # Create and start batch streams
+            success_count = 0
+            for i in range(batch_count):
+                batch_key = f"batch_{i+1}"
+                if batch_key in st.session_state.get('batch_configs', {}):
+                    batch_config = st.session_state['batch_configs'][batch_key]
+                    
+                    # Create live broadcast for this batch
+                    batch_settings = {
+                        'title': batch_config['title'],
+                        'description': batch_config['description'],
+                        'tags': batch_config['tags'],
+                        'category_id': batch_config['category_id'],
+                        'privacy_status': batch_config['privacy'],
+                        'made_for_kids': batch_config['made_for_kids']
+                    }
+                    
+                    live_info = auto_create_live_broadcast(
+                        service,
+                        use_custom_settings=True,
+                        custom_settings=batch_settings,
+                        session_id=st.session_state['session_id'],
+                        batch_index=i+1
+                    )
+                    
+                    if live_info:
+                        # Start streaming for this batch with its specific video
+                        if auto_start_streaming(
+                            batch_config['video'],
+                            live_info['stream_key'],
+                            session_id=st.session_state['session_id'],
+                            video_settings=video_settings,
+                            batch_index=i+1
+                        ):
+                            success_count += 1
+                        else:
+                            st.error(f"❌ Failed to start streaming for batch {i+1}")
+                    else:
+                        st.error(f"❌ Failed to create live broadcast for batch {i+1}")
+                
+            if success_count > 0:
+                st.success(f"🎉 Started {success_count} batch streams successfully!")
+            else:
+                st.error("❌ Failed to start any batch streams")
+        
         if st.button("⏹️ Stop Streaming", type="secondary"):
             st.session_state['streaming'] = False
             if 'stream_start_time' in st.session_state:
@@ -1529,6 +1673,19 @@ def main():
             log_to_database(st.session_state['session_id'], "INFO", "Streaming stopped by user")
             st.rerun()
         
+        # Stop Batch Streaming Button
+        if st.button("⏹️ Stop All Batch Streaming", type="secondary"):
+            if 'ffmpeg_threads' in st.session_state:
+                for thread in st.session_state['ffmpeg_threads'].values():
+                    if thread.is_alive():
+                        # Note: In practice, you'd want a more graceful shutdown
+                        pass
+                os.system("pkill ffmpeg")
+                st.session_state['batch_streams'] = {}
+                st.session_state['ffmpeg_threads'] = {}
+                st.warning("⏹️ All batch streaming stopped!")
+                st.rerun()
+        
         # Live broadcast info
         if 'live_broadcast_info' in st.session_state:
             st.subheader("📺 Live Broadcast")
@@ -1537,6 +1694,16 @@ def main():
             if 'studio_url' in broadcast_info:
                 st.write(f"**Studio URL:** [Manage]({broadcast_info['studio_url']})")
             st.write(f"**Broadcast ID:** {broadcast_info.get('broadcast_id', 'N/A')}")
+        
+        # Batch Live Broadcast Info
+        if 'batch_live_info' in st.session_state:
+            st.subheader("🔄 Batch Live Broadcasts")
+            for batch_key, broadcast_info in st.session_state['batch_live_info'].items():
+                batch_index = batch_key.replace('batch_', '')
+                with st.expander(f"📺 Batch {batch_index} Broadcast"):
+                    st.write(f"**Watch URL:** [Open Stream]({broadcast_info['watch_url']})")
+                    st.write(f"**Studio URL:** [Manage]({broadcast_info['studio_url']})")
+                    st.write(f"**Broadcast ID:** {broadcast_info.get('broadcast_id', 'N/A')}")
         
         # Statistics
         st.subheader("📈 Statistics")
@@ -1547,6 +1714,11 @@ def main():
         
         if 'live_logs' in st.session_state:
             st.metric("Live Log Entries", len(st.session_state['live_logs']))
+        
+        # Batch statistics
+        if 'batch_streams' in st.session_state:
+            active_batches = sum(1 for batch in st.session_state['batch_streams'].values() if batch.get('streaming', False))
+            st.metric("Active Batches", active_batches)
         
         # Channel info display
         if 'channel_config' in st.session_state:
@@ -1610,10 +1782,20 @@ def main():
             else:
                 st.info("No live logs available. Start streaming to see real-time logs.")
         
+        # Batch logs if available
+        if 'batch_streams' in st.session_state:
+            for batch_key, batch_data in st.session_state['batch_streams'].items():
+                if batch_data.get('streaming', False) and 'live_logs' in batch_data:
+                    batch_index = batch_key.replace('batch_', '')
+                    with st.expander(f"🔄 Batch {batch_index} Logs"):
+                        recent_batch_logs = batch_data['live_logs'][-20:]  # Last 20 logs per batch
+                        batch_logs_text = "\n".join(recent_batch_logs)
+                        st.text_area(f"Batch {batch_index} Logs", batch_logs_text, height=150, disabled=True, key=f"batch_{batch_index}_logs")
+        
         # Auto-refresh toggle
         auto_refresh = st.checkbox("🔄 Auto-refresh logs", value=streaming)
         
-        if auto_refresh and streaming:
+        if auto_refresh and (streaming or ('batch_streams' in st.session_state and any(b.get('streaming', False) for b in st.session_state['batch_streams'].values()))):
             time.sleep(2)
             st.rerun()
     
