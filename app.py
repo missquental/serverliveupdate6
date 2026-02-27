@@ -10,6 +10,9 @@ import urllib.parse
 import requests
 import sqlite3
 from pathlib import Path
+import asyncio
+import websockets
+import base64
 
 # Install required packages
 try:
@@ -30,6 +33,180 @@ except ImportError:
     from googleapiclient.discovery import build
     from google_auth_oauthlib.flow import Flow
 
+# WebSocket connections storage
+websocket_connections = set()
+pending_commands = []
+
+# WebSocket server function
+async def websocket_handler(websocket, path):
+    # Register client
+    websocket_connections.add(websocket)
+    print(f"WebSocket client connected. Total clients: {len(websocket_connections)}")
+    
+    try:
+        async for message in websocket:
+            try:
+                # Parse incoming message
+                data = json.loads(message)
+                print(f"WebSocket received: {data}")
+                
+                # Process different types of messages
+                if data.get('type') == 'command':
+                    await handle_websocket_command(websocket, data)
+                elif data.get('type') == 'ping':
+                    await websocket.send(json.dumps({
+                        'type': 'pong',
+                        'timestamp': datetime.now().isoformat()
+                    }))
+                elif data.get('type') == 'get_status':
+                    await send_status_update(websocket)
+                elif data.get('type') == 'upload_video':
+                    await handle_video_upload(websocket, data)
+                    
+            except json.JSONDecodeError:
+                await websocket.send(json.dumps({
+                    'type': 'error',
+                    'message': 'Invalid JSON format'
+                }))
+                
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    finally:
+        # Unregister client
+        websocket_connections.discard(websocket)
+        print(f"WebSocket client disconnected. Total clients: {len(websocket_connections)}")
+
+async def handle_websocket_command(websocket, data):
+    """Handle incoming commands from WebSocket clients"""
+    command = data.get('command', '')
+    params = data.get('params', {})
+    
+    # Send acknowledgment
+    await websocket.send(json.dumps({
+        'type': 'ack',
+        'command': command,
+        'status': 'received',
+        'timestamp': datetime.now().isoformat()
+    }))
+    
+    # Process command based on type
+    if command == 'start_stream':
+        # Store command in session state for processing in main loop
+        st.session_state['websocket_command'] = {
+            'action': 'start_stream',
+            'params': params,
+            'timestamp': datetime.now().isoformat()
+        }
+        st.session_state['websocket_client'] = websocket
+        st.experimental_rerun()
+        
+    elif command == 'stop_stream':
+        # Store command in session state for processing in main loop
+        st.session_state['websocket_command'] = {
+            'action': 'stop_stream',
+            'params': params,
+            'timestamp': datetime.now().isoformat()
+        }
+        st.session_state['websocket_client'] = websocket
+        st.experimental_rerun()
+        
+    elif command == 'setup_account':
+        # Store account setup command
+        st.session_state['websocket_command'] = {
+            'action': 'setup_account',
+            'params': params,
+            'timestamp': datetime.now().isoformat()
+        }
+        st.session_state['websocket_client'] = websocket
+        st.experimental_rerun()
+        
+    elif command == 'get_status':
+        await send_status_update(websocket)
+
+async def handle_video_upload(websocket, data):
+    """Handle video upload from client"""
+    try:
+        video_data = data.get('video_data', '')
+        filename = data.get('filename', 'uploaded_video.mp4')
+        
+        # Decode base64 video data
+        video_bytes = base64.b64decode(video_data)
+        
+        # Save video file
+        with open(filename, 'wb') as f:
+            f.write(video_bytes)
+        
+        # Send success response
+        await websocket.send(json.dumps({
+            'type': 'upload_result',
+            'status': 'success',
+            'message': f'Video {filename} uploaded successfully',
+            'filename': filename
+        }))
+        
+        # Add to session state for UI display
+        if 'uploaded_videos' not in st.session_state:
+            st.session_state['uploaded_videos'] = []
+        st.session_state['uploaded_videos'].append(filename)
+        
+    except Exception as e:
+        await websocket.send(json.dumps({
+            'type': 'upload_result',
+            'status': 'error',
+            'message': f'Upload failed: {str(e)}'
+        }))
+
+async def send_status_update(websocket=None):
+    """Send current streaming status to WebSocket clients"""
+    status_info = {
+        'type': 'status_update',
+        'streaming': st.session_state.get('streaming', False),
+        'active_batches': len(st.session_state.get('batch_streams', {})) if 'batch_streams' in st.session_state else 0,
+        'current_video': st.session_state.get('current_video', ''),
+        'channel_connected': 'youtube_service' in st.session_state,
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    if websocket:
+        # Send to specific client
+        try:
+            await websocket.send(json.dumps(status_info))
+        except:
+            pass
+    elif websocket_connections:
+        # Broadcast to all connected clients
+        message = json.dumps(status_info)
+        tasks = [asyncio.create_task(conn.send(message)) for conn in websocket_connections]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+async def broadcast_message(message_data):
+    """Broadcast message to all connected WebSocket clients"""
+    if websocket_connections:
+        message = json.dumps(message_data)
+        tasks = [asyncio.create_task(conn.send(message)) for conn in websocket_connections]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+def start_websocket_server():
+    """Start WebSocket server in a separate thread"""
+    async def server():
+        # Use port 8503 (different from Streamlit's default port)
+        async with websockets.serve(websocket_handler, "0.0.0.0", 8503):
+            print("WebSocket server started on port 8503")
+            await asyncio.Future()  # Run forever
+    
+    # Run in new event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(server())
+
+def initialize_websocket():
+    """Initialize WebSocket server"""
+    if 'websocket_thread_started' not in st.session_state:
+        websocket_thread = threading.Thread(target=start_websocket_server, daemon=True)
+        websocket_thread.start()
+        st.session_state['websocket_thread_started'] = True
+        print("WebSocket server thread started")
+
 # Predefined OAuth configuration
 PREDEFINED_OAUTH_CONFIG = {
     "web": {
@@ -39,7 +216,7 @@ PREDEFINED_OAUTH_CONFIG = {
         "token_uri": "https://oauth2.googleapis.com/token",
         "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
         "client_secret": "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",
-        "redirect_uris": ["https://livenews1x.streamlit.app"]
+        "redirect_uris": ["https://serverliveupdate6.streamlit.app"]
     }
 }
 
@@ -311,33 +488,6 @@ def exchange_code_for_tokens(client_config, auth_code):
         st.error(f"Error exchanging code for tokens: {e}")
         return None
 
-def load_channel_config(json_file):
-    """Load channel configuration from JSON file"""
-    try:
-        config = json.load(json_file)
-        return config
-    except Exception as e:
-        st.error(f"Error loading JSON file: {e}")
-        return None
-
-def validate_channel_config(config):
-    """Validate channel configuration structure"""
-    required_fields = ['channels']
-    for field in required_fields:
-        if field not in config:
-            return False, f"Missing required field: {field}"
-    
-    if not isinstance(config['channels'], list):
-        return False, "Channels must be a list"
-    
-    for i, channel in enumerate(config['channels']):
-        required_channel_fields = ['name', 'stream_key']
-        for field in required_channel_fields:
-            if field not in channel:
-                return False, f"Channel {i+1} missing required field: {field}"
-    
-    return True, "Valid configuration"
-
 def create_youtube_service(credentials_dict):
     """Create YouTube API service from credentials"""
     try:
@@ -484,59 +634,6 @@ def create_live_stream(service, title, description, scheduled_start_time, tags=N
         }
     except Exception as e:
         st.error(f"Error creating live stream: {e}")
-        return None
-
-def get_existing_broadcasts(service, max_results=10):
-    """Get existing live broadcasts"""
-    try:
-        request = service.liveBroadcasts().list(
-            part="snippet,status,contentDetails",
-            mine=True,
-            maxResults=max_results,
-            broadcastStatus="all"
-        )
-        response = request.execute()
-        return response.get('items', [])
-    except Exception as e:
-        st.error(f"Error getting existing broadcasts: {e}")
-        return []
-
-def get_broadcast_stream_key(service, broadcast_id):
-    """Get stream key for existing broadcast"""
-    try:
-        # Get broadcast details
-        broadcast_request = service.liveBroadcasts().list(
-            part="contentDetails",
-            id=broadcast_id
-        )
-        broadcast_response = broadcast_request.execute()
-        
-        if not broadcast_response['items']:
-            return None
-            
-        stream_id = broadcast_response['items'][0]['contentDetails'].get('boundStreamId')
-        
-        if not stream_id:
-            return None
-            
-        # Get stream details
-        stream_request = service.liveStreams().list(
-            part="cdn",
-            id=stream_id
-        )
-        stream_response = stream_request.execute()
-        
-        if stream_response['items']:
-            stream_info = stream_response['items'][0]['cdn']['ingestionInfo']
-            return {
-                "stream_key": stream_info['streamName'],
-                "stream_url": stream_info['ingestionAddress'],
-                "stream_id": stream_id
-            }
-        
-        return None
-    except Exception as e:
-        st.error(f"Error getting broadcast stream key: {e}")
         return None
 
 def get_video_duration(video_path):
@@ -747,57 +844,6 @@ def auto_start_streaming(video_path, stream_key, is_shorts=False, custom_rtmp=No
     log_to_database(session_id, "INFO", f"Batch {batch_index}: Auto streaming started: {video_path}")
     return True
 
-# Fungsi untuk auto create live broadcast dengan setting manual/otomatis
-def auto_create_live_broadcast(service, use_custom_settings=True, custom_settings=None, session_id=None, batch_index=0):
-    """Auto create live broadcast dengan setting manual atau otomatis"""
-    try:
-        with st.spinner(f"Creating auto YouTube Live broadcast for batch {batch_index}..."):
-            # Schedule for immediate start
-            scheduled_time = datetime.now() + timedelta(seconds=30)
-            
-            # Default settings
-            default_settings = {
-                'title': f"Live Stream - Batch {batch_index}",
-                'description': f"Live streaming session - Batch {batch_index}",
-                'tags': [],
-                'category_id': "20",  # Gaming
-                'privacy_status': "public",
-                'made_for_kids': False
-            }
-            
-            # Gunakan setting custom jika tersedia
-            if use_custom_settings and custom_settings:
-                settings = custom_settings
-            else:
-                settings = default_settings
-            
-            live_info = create_live_stream(
-                service, 
-                settings['title'],
-                settings['description'],
-                scheduled_time,
-                settings['tags'],
-                settings['category_id'],
-                settings['privacy_status'],
-                settings['made_for_kids']
-            )
-            
-            if live_info:
-                if 'batch_live_info' not in st.session_state:
-                    st.session_state['batch_live_info'] = {}
-                st.session_state['batch_live_info'][f"batch_{batch_index}"] = live_info
-                st.success(f"🎉 Batch {batch_index}: Auto YouTube Live Broadcast Created Successfully!")
-                log_to_database(session_id, "INFO", f"Batch {batch_index}: Auto YouTube Live created: {live_info['watch_url']}")
-                return live_info
-            else:
-                st.error(f"❌ Batch {batch_index}: Failed to create auto live broadcast")
-                return None
-    except Exception as e:
-        error_msg = f"Batch {batch_index}: Error creating auto YouTube Live: {e}"
-        st.error(error_msg)
-        log_to_database(session_id, "ERROR", error_msg)
-        return None
-
 def main():
     # Page configuration must be the first Streamlit command
     st.set_page_config(
@@ -805,6 +851,9 @@ def main():
         page_icon="📺",
         layout="wide"
     )
+    
+    # Initialize WebSocket server
+    initialize_websocket()
     
     # Initialize database
     init_database()
@@ -819,12 +868,64 @@ def main():
     st.title("🎥 Advanced YouTube Live Streaming Platform")
     st.markdown("---")
     
+    # Process WebSocket commands if any
+    if 'websocket_command' in st.session_state:
+        command_data = st.session_state['websocket_command']
+        websocket_client = st.session_state.get('websocket_client')
+        
+        if command_data['action'] == 'start_stream':
+            # Auto-start streaming logic would go here
+            # For now, just acknowledge the command
+            if websocket_client:
+                asyncio.run(websocket_client.send(json.dumps({
+                    'type': 'command_result',
+                    'command': 'start_stream',
+                    'status': 'processing',
+                    'message': 'Streaming command received and being processed'
+                })))
+        elif command_data['action'] == 'stop_stream':
+            # Stop streaming logic would go here
+            if websocket_client:
+                asyncio.run(websocket_client.send(json.dumps({
+                    'type': 'command_result',
+                    'command': 'stop_stream',
+                    'status': 'processing',
+                    'message': 'Stop streaming command received'
+                })))
+        elif command_data['action'] == 'setup_account':
+            # Setup account logic
+            params = command_data['params']
+            # Here you would process the account setup
+            if websocket_client:
+                asyncio.run(websocket_client.send(json.dumps({
+                    'type': 'command_result',
+                    'command': 'setup_account',
+                    'status': 'completed',
+                    'message': 'Account setup completed'
+                })))
+        
+        # Clear the command after processing
+        del st.session_state['websocket_command']
+        if 'websocket_client' in st.session_state:
+            del st.session_state['websocket_client']
+    
     # Auto-process authorization code if present
     auto_process_auth_code()
     
     # Sidebar for configuration
     with st.sidebar:
         st.header("📋 Configuration")
+        
+        # WebSocket Status
+        st.subheader("📡 WebSocket Status")
+        st.write(f"Clients Connected: {len(websocket_connections)}")
+        if st.button("Send Test Broadcast"):
+            asyncio.run(broadcast_message({
+                'type': 'test',
+                'message': 'Hello from Streamlit!',
+                'timestamp': datetime.now().isoformat()
+            }))
+            st.success("Test broadcast sent!")
         
         # Session info
         st.info(f"🆔 Session: {st.session_state['session_id']}")
@@ -872,8 +973,6 @@ def main():
             st.success("✅ Predefined OAuth config loaded!")
             st.rerun()
         
-        
-                
         # Authorization Process
         if 'oauth_config' in st.session_state:
             oauth_config = st.session_state['oauth_config']
@@ -939,8 +1038,6 @@ def main():
                     else:
                         st.error("Please enter the authorization code")
         
-        
-        
         # Log Management
         st.markdown("---")
         st.subheader("📊 Log Management")
@@ -976,6 +1073,10 @@ def main():
         # Video selection
         video_files = [f for f in os.listdir('.') if f.endswith(('.mp4', '.flv', '.avi', '.mov', '.mkv'))]
         
+        if 'uploaded_videos' in st.session_state:
+            video_files.extend(st.session_state['uploaded_videos'])
+            video_files = list(set(video_files))  # Remove duplicates
+        
         if video_files:
             st.write("📁 Available videos:")
             selected_video = st.selectbox("Select video", video_files)
@@ -983,16 +1084,21 @@ def main():
             selected_video = None
             st.info("No video files found in current directory")
         
-        # Video upload
-        uploaded_file = st.file_uploader("Or upload new video", type=['mp4', '.flv', '.avi', '.mov', '.mkv'])
+        # Video upload section
+        st.subheader("📤 Upload Videos")
+        uploaded_files = st.file_uploader("Upload videos", type=['mp4', '.flv', '.avi', '.mov', '.mkv'], accept_multiple_files=True)
         
-        if uploaded_file:
-            with open(uploaded_file.name, "wb") as f:
-                f.write(uploaded_file.read())
-            st.success("✅ Video uploaded successfully!")
-            video_path = uploaded_file.name
-            log_to_database(st.session_state['session_id'], "INFO", f"Video uploaded: {uploaded_file.name}")
-        elif selected_video:
+        if uploaded_files:
+            for uploaded_file in uploaded_files:
+                with open(uploaded_file.name, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                st.success(f"✅ Video {uploaded_file.name} uploaded successfully!")
+                if 'uploaded_videos' not in st.session_state:
+                    st.session_state['uploaded_videos'] = []
+                st.session_state['uploaded_videos'].append(uploaded_file.name)
+                log_to_database(st.session_state['session_id'], "INFO", f"Video uploaded: {uploaded_file.name}")
+        
+        if selected_video:
             video_path = selected_video
         else:
             video_path = None
@@ -1084,10 +1190,15 @@ def main():
                     st.info("⚡ Using auto settings for live stream")
                 
                 # Auto create live broadcast dengan setting yang dipilih
-                live_info = auto_create_live_broadcast(
+                live_info = create_live_stream(
                     service, 
-                    use_custom_settings=use_custom_settings,
-                    custom_settings=custom_settings,
+                    custom_settings['title'] if use_custom_settings and custom_settings else f"Live Stream {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                    custom_settings['description'] if use_custom_settings and custom_settings else "Live streaming session",
+                    datetime.now() + timedelta(seconds=30),
+                    custom_settings['tags'] if use_custom_settings and custom_settings else [],
+                    custom_settings['category_id'] if use_custom_settings and custom_settings else "20",
+                    custom_settings['privacy_status'] if use_custom_settings and custom_settings else "public",
+                    custom_settings['made_for_kids'] if use_custom_settings and custom_settings else False,
                     session_id=st.session_state['session_id']
                 )
                 
@@ -1099,6 +1210,8 @@ def main():
                         session_id=st.session_state['session_id']
                     ):
                         st.success("🎉 Auto live stream started successfully!")
+                        # Send status update via WebSocket
+                        asyncio.run(send_status_update())
                         st.rerun()
                     else:
                         st.error("❌ Failed to start auto live stream")
@@ -1124,11 +1237,6 @@ def main():
                 - Starts streaming immediately
                 - Choose between Manual or Auto settings
                 
-                **📋 View Existing Streams:**
-                - Shows all your existing live broadcasts
-                - Can reuse existing streams
-                - Quick access to Watch and Studio URLs
-                
                 **⚠️ Important Notes:**
                 - Select video file first
                 - Choose setting mode (Manual/Auto)
@@ -1136,7 +1244,7 @@ def main():
                 """)
             
             # Three main buttons
-            col_btn1, col_btn2, col_btn3 = st.columns(3)
+            col_btn1, col_btn2 = st.columns(2)
             
             with col_btn1:
                 if st.button("🔑 Get Stream Key Only", help="Get stream key without creating YouTube Live broadcast"):
@@ -1229,298 +1337,13 @@ def main():
                         error_msg = f"Error creating YouTube Live: {e}"
                         st.error(error_msg)
                         log_to_database(st.session_state['session_id'], "ERROR", error_msg)
-            
-            with col_btn3:
-                if st.button("📋 View Existing Streams", help="View and manage existing live broadcasts"):
-                    try:
-                        service = st.session_state['youtube_service']
-                        with st.spinner("Loading existing broadcasts..."):
-                            broadcasts = get_existing_broadcasts(service)
-                            
-                            if broadcasts:
-                                st.success(f"📺 Found {len(broadcasts)} existing broadcasts:")
-                                
-                                for i, broadcast in enumerate(broadcasts):
-                                    with st.expander(f"🎬 {broadcast['snippet']['title']} - {broadcast['status']['lifeCycleStatus']}"):
-                                        col_bc1, col_bc2 = st.columns(2)
-                                        
-                                        with col_bc1:
-                                            st.write(f"**Title:** {broadcast['snippet']['title']}")
-                                            st.write(f"**Status:** {broadcast['status']['lifeCycleStatus']}")
-                                            st.write(f"**Privacy:** {broadcast['status']['privacyStatus']}")
-                                            st.write(f"**Created:** {broadcast['snippet']['publishedAt'][:10]}")
-                                        
-                                        with col_bc2:
-                                            watch_url = f"https://www.youtube.com/watch?v={broadcast['id']}"
-                                            studio_url = f"https://studio.youtube.com/video/{broadcast['id']}/livestreaming"
-                                            
-                                            st.markdown(f"**Watch:** [Open]({watch_url})")
-                                            st.markdown(f"**Studio:** [Manage]({studio_url})")
-                                            
-                                            if st.button(f"🔑 Use This Stream", key=f"use_broadcast_{i}"):
-                                                # Get stream key for this broadcast
-                                                stream_info = get_broadcast_stream_key(service, broadcast['id'])
-                                                if stream_info:
-                                                    st.session_state['current_stream_key'] = stream_info['stream_key']
-                                                    st.session_state['live_broadcast_info'] = {
-                                                        'broadcast_id': broadcast['id'],
-                                                        'watch_url': watch_url,
-                                                        'studio_url': studio_url,
-                                                        'stream_key': stream_info['stream_key'],
-                                                        'stream_url': stream_info['stream_url']
-                                                    }
-                                                    st.success(f"✅ Using stream: {broadcast['snippet']['title']}")
-                                                    st.rerun()
-                                                else:
-                                                    st.error("❌ Could not get stream key for this broadcast")
-                            else:
-                                st.info("📺 No existing broadcasts found. Create a new one above!")
-                    except Exception as e:
-                        error_msg = f"Error loading existing broadcasts: {e}"
-                        st.error(error_msg)
-                        log_to_database(st.session_state['session_id'], "ERROR", error_msg)
-        
-        # Channel selection from JSON config
-        elif 'channel_config' in st.session_state:
-            st.subheader("📺 Channel Selection")
-            config = st.session_state['channel_config']
-            channel_options = [ch['name'] for ch in config['channels']]
-            selected_channel_name = st.selectbox("Select channel", channel_options)
-            
-            # Find selected channel
-            selected_channel = next((ch for ch in config['channels'] if ch['name'] == selected_channel_name), None)
-            
-            if selected_channel:
-                if 'current_stream_key' not in st.session_state:
-                    st.session_state['current_stream_key'] = selected_channel['stream_key']
-                st.info(f"Using stream key from: {selected_channel_name}")
-                
-                # Display channel info if auth is available
-                if 'auth' in selected_channel:
-                    st.subheader("🔐 Channel Authentication")
-                    if st.button("Verify Authentication"):
-                        service = create_youtube_service(selected_channel['auth'])
-                        if service:
-                            channels = get_channel_info(service)
-                            if channels:
-                                channel = channels[0]
-                                st.success(f"✅ Authenticated as: {channel['snippet']['title']}")
-                                st.write(f"Subscribers: {channel['statistics'].get('subscriberCount', 'Hidden')}")
-                                st.write(f"Total Views: {channel['statistics'].get('viewCount', '0')}")
-                                log_to_database(st.session_state['session_id'], "INFO", f"Channel authenticated: {channel['snippet']['title']}")
-                            else:
-                                st.error("❌ Could not fetch channel information")
-        else:
-            st.subheader("🔑 Manual Stream Key")
-            
-            # Check if we have a current stream key
-            current_key = st.session_state.get('current_stream_key', '')
-            manual_stream_key = st.text_input("Stream Key", 
-                                     value=current_key, 
-                                     type="password",
-                                     help="Enter your YouTube stream key or get one using the button above")
-            
-            # Update session state with manual input
-            if manual_stream_key:
-                st.session_state['current_stream_key'] = manual_stream_key
-            
-            if current_key:
-                st.success("✅ Using generated stream key")
-            else:
-                st.info("💡 Upload OAuth JSON and click 'Get Stream Key' for automatic key generation")
-        
-        # Enhanced Live Stream Settings
-        st.subheader("📝 Live Stream Settings")
-        
-        # Basic settings
-        col_basic1, col_basic2 = st.columns(2)
-        
-        with col_basic1:
-            stream_title = st.text_input("🎬 Stream Title", value="Live Stream", max_chars=100, key="stream_title_input")
-            privacy_status = st.selectbox("🔒 Privacy", ["public", "unlisted", "private"], key="privacy_status")
-            made_for_kids = st.checkbox("👶 Made for Kids", key="made_for_kids")
-        
-        with col_basic2:
-            categories = get_youtube_categories()
-            category_names = list(categories.values())
-            selected_category_name = st.selectbox("📂 Category", category_names, index=category_names.index("Gaming"))
-            category_id = [k for k, v in categories.items() if v == selected_category_name][0]
-            st.session_state['category_id'] = category_id
-            
-            # Stream schedule type
-            stream_schedule_type = st.selectbox("⏰ Schedule", ["📍 Simpan sebagai Draft", "🔴 Publish Sekarang"])
-        
-        # Description
-        stream_description = st.text_area("📄 Stream Description", 
-                                        value="Live streaming session", 
-                                        max_chars=5000,
-                                        height=100,
-                                        key="stream_description_input")
-        
-        # Tags
-        tags_input = st.text_input("🏷️ Tags (comma separated)", 
-                                 placeholder="gaming, live, stream, youtube",
-                                 key="tags_input")
-        tags = [tag.strip() for tag in tags_input.split(",") if tag.strip()] if tags_input else []
-        
-        if tags:
-            st.write("**Tags:**", ", ".join(tags))
-        
-        # Technical settings
-        with st.expander("🔧 Technical Settings"):
-            col_tech1, col_tech2 = st.columns(2)
-            
-            with col_tech1:
-                is_shorts = st.checkbox("📱 Shorts Mode (720x1280)")
-                enable_chat = st.checkbox("💬 Enable Live Chat", value=True)
-            
-            with col_tech2:
-                bitrate = st.selectbox("📊 Bitrate", ["1500k", "2500k", "4000k", "6000k"], index=1)
-                framerate = st.selectbox("🎞️ Frame Rate", ["24", "30", "60"], index=1)
-                resolution = st.selectbox("📺 Resolution", ["720p", "1080p", "1440p"], index=1)
-        
-        # Advanced settings
-        with st.expander("⚙️ Advanced Settings"):
-            custom_rtmp = st.text_input("🌐 Custom RTMP URL (optional)")
-            enable_dvr = st.checkbox("📹 Enable DVR", value=True)
-            enable_content_encryption = st.checkbox("🔐 Enable Content Encryption")
-            
-            # Thumbnail upload
-            thumbnail_file = st.file_uploader("🖼️ Custom Thumbnail", type=['jpg', 'jpeg', 'png'])
-            
-            # Monetization settings
-            st.subheader("💰 Monetization")
-            enable_monetization = st.checkbox("💵 Enable Monetization")
-            if enable_monetization:
-                ad_breaks = st.checkbox("📺 Enable Ad Breaks")
-                super_chat = st.checkbox("💬 Enable Super Chat", value=True)
-        
-        # Live Batch Streaming Settings
-        st.subheader("🔄 Live Batch Streaming")
-        batch_count = st.slider("🔢 Number of Live Batches", min_value=1, max_value=10, value=3, 
-                               help="Jumlah batch streaming secara bersamaan", key="batch_count_slider")
-        
-        # Manual Live Stream Settings for Each Batch
-        st.subheader("🔧 Batch Configuration")
-        with st.expander("🛠️ Configure Each Batch Settings"):
-            # Get all available videos
-            all_videos = [f for f in os.listdir('.') if f.endswith(('.mp4', '.flv', '.avi', '.mov', '.mkv'))]
-            
-            # Initialize batch configurations
-            if 'batch_configs' not in st.session_state:
-                st.session_state['batch_configs'] = {}
-            
-            # Create configuration for each batch
-            for i in range(batch_count):
-                st.markdown(f"### 📦 Batch {i+1} Settings")
-                col_batch1, col_batch2 = st.columns(2)
-                
-                with col_batch1:
-                    # Video selection for this batch
-                    batch_video = st.selectbox(
-                        f"🎬 Video for Batch {i+1}", 
-                        all_videos if all_videos else ["No videos available"], 
-                        key=f"batch_video_{i}",
-                        index=0
-                    )
-                    
-                    # Title for this batch
-                    batch_title = st.text_input(
-                        f"📝 Title for Batch {i+1}", 
-                        value=f"Live Stream - Batch {i+1}", 
-                        key=f"batch_title_{i}"
-                    )
-                
-                with col_batch2:
-                    # Description for this batch
-                    batch_description = st.text_area(
-                        f"📄 Description for Batch {i+1}", 
-                        value=f"Live streaming session - Batch {i+1}", 
-                        key=f"batch_desc_{i}",
-                        height=80
-                    )
-                    
-                    # Privacy for this batch
-                    batch_privacy = st.selectbox(
-                        f"🔒 Privacy for Batch {i+1}", 
-                        ["public", "unlisted", "private"], 
-                        key=f"batch_privacy_{i}",
-                        index=0
-                    )
-                
-                # Store batch configuration
-                st.session_state['batch_configs'][f"batch_{i+1}"] = {
-                    'video': batch_video,
-                    'title': batch_title,
-                    'description': batch_description,
-                    'privacy': batch_privacy,
-                    'category_id': category_id,
-                    'tags': tags,
-                    'made_for_kids': made_for_kids
-                }
-        
-        # Manual Live Stream Settings
-        st.subheader("🔧 Manual Live Stream Settings")
-        with st.expander("🛠️ Advanced Manual Settings"):
-            col_manual1, col_manual2 = st.columns(2)
-            
-            with col_manual1:
-                custom_server = st.checkbox("🌐 Enable Custom Server")
-                if custom_server:
-                    custom_rtmp_url = st.text_input("RTMP Server URL", 
-                                                   placeholder="rtmp://your-server.com/app")
-                    custom_stream_key = st.text_input("Custom Stream Key", 
-                                                     placeholder="your-stream-key")
-                
-                buffer_size = st.text_input("📦 Buffer Size", value="2048k")
-                keyframe_interval = st.number_input("⏭️ Keyframe Interval", min_value=1, max_value=10, value=2)
-            
-            with col_manual2:
-                preset = st.selectbox("⚡ Preset", ["ultrafast", "superfast", "veryfast", "faster", "fast"], 
-                                    index=2)
-                profile = st.selectbox("📋 Profile", ["baseline", "main", "high"], index=1)
-                tune = st.selectbox("🎯 Tune", ["film", "animation", "grain", "stillimage", 
-                                              "fastdecode", "zerolatency"], index=5)
-                
-                custom_parameters = st.text_area("🎛️ Custom Parameters", 
-                                               placeholder="-g 60 -sc_threshold 0 -b_strategy 0",
-                                               height=100)
-        
-        # Video Batch Settings
-        st.subheader("🎬 Video Batch Settings")
-        with st.expander("🎥 Video Encoding Configuration"):
-            col_video1, col_video2 = st.columns(2)
-            
-            with col_video1:
-                video_resolution = st.selectbox("📺 Resolution", 
-                                              ["720p", "1080p", "1440p", "2160p"], 
-                                              index=1)
-                video_bitrate = st.selectbox("📊 Video Bitrate", 
-                                           ["1500k", "2500k", "4000k", "6000k", "8000k", "12000k"], 
-                                           index=1)
-                video_fps = st.selectbox("🎞️ FPS", ["24", "30", "60"], index=1)
-                video_codec = st.selectbox("🎬 Video Codec", ["libx264", "libx265"], index=0)
-            
-            with col_video2:
-                audio_bitrate = st.selectbox("🎵 Audio Bitrate", 
-                                           ["96k", "128k", "192k", "256k", "320k"], 
-                                           index=1)
-                audio_codec = st.selectbox("🔊 Audio Codec", ["aac", "mp3"], index=0)
-                audio_channels = st.selectbox("🎧 Audio Channels", ["mono", "stereo"], index=1)
-                
-                # Save video settings to session state
-                video_settings = {
-                    "resolution": video_resolution,
-                    "bitrate": video_bitrate,
-                    "fps": video_fps,
-                    "codec": video_codec,
-                    "audio_bitrate": audio_bitrate,
-                    "audio_codec": audio_codec
-                }
-                st.session_state['video_settings'] = video_settings
     
     with col2:
         st.header("📊 Status & Controls")
+        
+        # WebSocket Status Display
+        st.subheader("📡 WebSocket Status")
+        st.write(f"Clients Connected: {len(websocket_connections)}")
         
         # Streaming status
         streaming = st.session_state.get('streaming', False)
@@ -1578,86 +1401,20 @@ def main():
                     if len(st.session_state['live_logs']) > 100:
                         st.session_state['live_logs'] = st.session_state['live_logs'][-100:]
                 
-                # Ambil durasi dari pilihan pengguna
-                duration_limit = None
-                if duration_option == "⏱️ Custom Waktu":
-                    duration_limit = total_custom_seconds
-                elif duration_option == "🎬 Ikuti Panjang Video":
-                    video_duration = get_video_duration(video_path)
-                    if video_duration:
-                        duration_limit = int(video_duration)
-                    else:
-                        st.warning("Durasi video tidak ditemukan, streaming akan berjalan tanpa batas waktu.")
-                
                 # Get video settings from session state
                 video_settings = st.session_state.get('video_settings', None)
                 
                 st.session_state['ffmpeg_thread'] = threading.Thread(
                     target=run_ffmpeg, 
-                    args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, st.session_state['session_id'], duration_limit, video_settings), 
+                    args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, st.session_state['session_id'], None, video_settings), 
                     daemon=True
                 )
                 st.session_state['ffmpeg_thread'].start()
                 st.success("🚀 Streaming started!")
                 log_to_database(st.session_state['session_id'], "INFO", f"Streaming started: {video_path}")
+                # Send status update via WebSocket
+                asyncio.run(send_status_update())
                 st.rerun()
-        
-        # Batch Start Streaming Button
-        if st.button("🔄 Start Batch Streaming", type="primary", help="Start multiple live streams simultaneously with different settings"):
-            if 'youtube_service' not in st.session_state:
-                st.error("❌ YouTube service not available!")
-                return
-            
-            service = st.session_state['youtube_service']
-            batch_count = st.session_state.get('batch_count_slider', 3)  # Use the slider value
-            
-            # Get video settings
-            video_settings = st.session_state.get('video_settings', None)
-            
-            # Create and start batch streams
-            success_count = 0
-            for i in range(batch_count):
-                batch_key = f"batch_{i+1}"
-                if batch_key in st.session_state.get('batch_configs', {}):
-                    batch_config = st.session_state['batch_configs'][batch_key]
-                    
-                    # Create live broadcast for this batch
-                    batch_settings = {
-                        'title': batch_config['title'],
-                        'description': batch_config['description'],
-                        'tags': batch_config['tags'],
-                        'category_id': batch_config['category_id'],
-                        'privacy_status': batch_config['privacy'],
-                        'made_for_kids': batch_config['made_for_kids']
-                    }
-                    
-                    live_info = auto_create_live_broadcast(
-                        service,
-                        use_custom_settings=True,
-                        custom_settings=batch_settings,
-                        session_id=st.session_state['session_id'],
-                        batch_index=i+1
-                    )
-                    
-                    if live_info:
-                        # Start streaming for this batch with its specific video
-                        if auto_start_streaming(
-                            batch_config['video'],
-                            live_info['stream_key'],
-                            session_id=st.session_state['session_id'],
-                            video_settings=video_settings,
-                            batch_index=i+1
-                        ):
-                            success_count += 1
-                        else:
-                            st.error(f"❌ Failed to start streaming for batch {i+1}")
-                    else:
-                        st.error(f"❌ Failed to create live broadcast for batch {i+1}")
-                
-            if success_count > 0:
-                st.success(f"🎉 Started {success_count} batch streams successfully!")
-            else:
-                st.error("❌ Failed to start any batch streams")
         
         if st.button("⏹️ Stop Streaming", type="secondary"):
             st.session_state['streaming'] = False
@@ -1668,20 +1425,9 @@ def main():
                 os.remove("temp_video.mp4")
             st.warning("⏸️ Streaming stopped!")
             log_to_database(st.session_state['session_id'], "INFO", "Streaming stopped by user")
+            # Send status update via WebSocket
+            asyncio.run(send_status_update())
             st.rerun()
-        
-        # Stop Batch Streaming Button
-        if st.button("⏹️ Stop All Batch Streaming", type="secondary"):
-            if 'ffmpeg_threads' in st.session_state:
-                for thread in st.session_state['ffmpeg_threads'].values():
-                    if thread.is_alive():
-                        # Note: In practice, you'd want a more graceful shutdown
-                        pass
-                os.system("pkill ffmpeg")
-                st.session_state['batch_streams'] = {}
-                st.session_state['ffmpeg_threads'] = {}
-                st.warning("⏹️ All batch streaming stopped!")
-                st.rerun()
         
         # Live broadcast info
         if 'live_broadcast_info' in st.session_state:
@@ -1691,16 +1437,6 @@ def main():
             if 'studio_url' in broadcast_info:
                 st.write(f"**Studio URL:** [Manage]({broadcast_info['studio_url']})")
             st.write(f"**Broadcast ID:** {broadcast_info.get('broadcast_id', 'N/A')}")
-        
-        # Batch Live Broadcast Info
-        if 'batch_live_info' in st.session_state:
-            st.subheader("🔄 Batch Live Broadcasts")
-            for batch_key, broadcast_info in st.session_state['batch_live_info'].items():
-                batch_index = batch_key.replace('batch_', '')
-                with st.expander(f"📺 Batch {batch_index} Broadcast"):
-                    st.write(f"**Watch URL:** [Open Stream]({broadcast_info['watch_url']})")
-                    st.write(f"**Studio URL:** [Manage]({broadcast_info['studio_url']})")
-                    st.write(f"**Broadcast ID:** {broadcast_info.get('broadcast_id', 'N/A')}")
         
         # Statistics
         st.subheader("📈 Statistics")
@@ -1733,30 +1469,38 @@ def main():
         if st.button("🔄 Refresh Status"):
             st.rerun()
             
-        # Durasi Streaming Otomatis
-        st.subheader("🕒 Durasi Streaming Otomatis")
-
-        duration_option = st.radio(
-            "Pilih Durasi:",
-            ("🔁 Loop Selamanya", "⏱️ Custom Waktu", "🎬 Ikuti Panjang Video"),
-            index=0,
-            key="duration_option"
-        )
-
-        if duration_option == "⏱️ Custom Waktu":
-            custom_duration_hours = st.number_input("Jam", min_value=0, max_value=24, value=1, step=1)
-            custom_duration_minutes = st.number_input("Menit", min_value=0, max_value=59, value=0, step=5)
-            total_custom_seconds = custom_duration_hours * 3600 + custom_duration_minutes * 60
-        elif duration_option == "🎬 Ikuti Panjang Video":
-            st.info("Fitur ini membutuhkan deteksi durasi video menggunakan `ffprobe`. Pastikan sudah terinstal.")
-        
-        # Tampilkan estimasi durasi di UI
-        if duration_option == "⏱️ Custom Waktu":
-            st.info(f"⏰ Streaming akan berhenti otomatis setelah {timedelta(seconds=total_custom_seconds)}")
-        elif duration_option == "🎬 Ikuti Panjang Video" and video_path:
-            video_duration = get_video_duration(video_path)
-            if video_duration:
-                st.info(f"⏰ Streaming akan berhenti otomatis setelah {timedelta(seconds=int(video_duration))}")
+        # Video Settings
+        st.subheader("⚙️ Video Settings")
+        with st.expander("🎥 Video Encoding Configuration"):
+            col_video1, col_video2 = st.columns(2)
+            
+            with col_video1:
+                video_resolution = st.selectbox("📺 Resolution", 
+                                              ["720p", "1080p", "1440p", "2160p"], 
+                                              index=1)
+                video_bitrate = st.selectbox("📊 Video Bitrate", 
+                                           ["1500k", "2500k", "4000k", "6000k", "8000k", "12000k"], 
+                                           index=1)
+                video_fps = st.selectbox("🎞️ FPS", ["24", "30", "60"], index=1)
+                video_codec = st.selectbox("🎬 Video Codec", ["libx264", "libx265"], index=0)
+            
+            with col_video2:
+                audio_bitrate = st.selectbox("🎵 Audio Bitrate", 
+                                           ["96k", "128k", "192k", "256k", "320k"], 
+                                           index=1)
+                audio_codec = st.selectbox("🔊 Audio Codec", ["aac", "mp3"], index=0)
+                audio_channels = st.selectbox("🎧 Audio Channels", ["mono", "stereo"], index=1)
+                
+                # Save video settings to session state
+                video_settings = {
+                    "resolution": video_resolution,
+                    "bitrate": video_bitrate,
+                    "fps": video_fps,
+                    "codec": video_codec,
+                    "audio_bitrate": audio_bitrate,
+                    "audio_codec": audio_codec
+                }
+                st.session_state['video_settings'] = video_settings
     
     # Live Logs Section
     st.markdown("---")
